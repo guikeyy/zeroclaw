@@ -40,7 +40,7 @@ jobs:
         run: |
           cd target/armv7-unknown-linux-gnueabihf/release
           # 使用提取到的版本号命名
-          FILENAME="zeroclaw-${{ steps.get_version.outputs.VERSION }}-armv7.tar.gz"
+          FILENAME="zeroclaw-${{ steps.get_version.outputs.VERSION }}-armv7-unknown-linux-gnueabihf.tar.gz"
           tar -czvf $FILENAME zeroclaw
           mv $FILENAME ../../../
           echo "FILENAME=$FILENAME" >> $GITHUB_ENV
