@@ -1,72 +1,84 @@
-name: Scheduled Build ZeroClaw (ARMv7)
+name: Scheduled Build ZeroClaw (ARMv7 Optimized)
 
 on:
   schedule:
-    # 每天北京时间 12:00 (UTC 04:00) 运行
     - cron: '0 4 * * *'
-  workflow_dispatch: # 保留手动触发按钮
+  workflow_dispatch:
 
 jobs:
-  check_and_build:
+  build_official_latest:
     runs-on: ubuntu-latest
+    # 显式声明权限，防止 Release 失败
+    permissions:
+      contents: write
     steps:
       - name: Checkout Upstream Master
         uses: actions/checkout@v4
         with:
           repository: zeroclaw-labs/zeroclaw
           ref: master
+          fetch-depth: 1
 
-      - name: Extract Version from Cargo.toml
+      - name: Log Upstream Commit Info
+        run: |
+          echo "Building from upstream commit:"
+          git log -1 --format="%H - %s (%cr)"
+
+      - name: Extract Version
         id: get_version
         run: |
-          # 提取 Cargo.toml 中的 version 字段
           VERSION=$(grep "^version =" Cargo.toml | head -1 | cut -d '"' -f 2)
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-          echo "检测到版本号: $VERSION"
-          
+          echo "Target Version: $VERSION"
+
       - name: Optimize Cargo.toml for Size
         run: |
+          # 移除原有的 profile.release 及其之后的内容
+          sed -i '/\[profile.release\]/,$d' Cargo.toml
+          # 追加极致体积优化配置
+          echo "" >> Cargo.toml
           echo "[profile.release]" >> Cargo.toml
-          echo "opt-level = 'z'" >> Cargo.toml
-          echo "lto = true" >> Cargo.toml
-          echo "codegen-units = 1" >> Cargo.toml
-          echo "panic = 'abort'" >> Cargo.toml
-          echo "strip = true" >> Cargo.toml
-          
-      - name: Install Rust toolchain
+          echo "opt-level = 'z'" >> Cargo.toml     # 极致体积优化
+          echo "lto = true" >> Cargo.toml          # 全局链接优化
+          echo "codegen-units = 1" >> Cargo.toml   # 牺牲编译速度换取最高优化
+          echo "panic = 'abort'" >> Cargo.toml     # 移除异常回溯以减小体积
+          echo "strip = true" >> Cargo.toml        # 剥离所有调试符号表
+          echo "--- 修改后的 Cargo.toml 尾部 ---"
+          tail -n 10 Cargo.toml
+
+      - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: armv7-unknown-linux-gnueabihf
 
-      - name: Install cross
+      - name: Install Cross
         run: cargo install cross --git https://github.com/cross-rs/cross.git
 
-      - name: Build with cross
+      - name: Build for ARMv7
         run: |
           cross build --target armv7-unknown-linux-gnueabihf --release
 
       - name: Package Binary
         run: |
           cd target/armv7-unknown-linux-gnueabihf/release
-          # 使用提取到的版本号命名
-          FILENAME="zeroclaw-${{ steps.get_version.outputs.VERSION }}-armv7-unknown-linux-gnueabihf.tar.gz"
+          FILENAME="zeroclaw-v${{ steps.get_version.outputs.VERSION }}-armv7-optimized.tar.gz"
           tar -czvf $FILENAME zeroclaw
           mv $FILENAME ../../../
           echo "FILENAME=$FILENAME" >> $GITHUB_ENV
 
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.FILENAME }}
-          path: ${{ env.FILENAME }}
-
-      - name: Create GitHub Release
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          # 使用版本号作为标签
           tag_name: v${{ steps.get_version.outputs.VERSION }}
-          name: Release v${{ steps.get_version.outputs.VERSION }}
+          name: Release v${{ steps.get_version.outputs.VERSION }} (Optimized)
           files: ${{ env.FILENAME }}
-          body: "自动构建于 $(date +'%Y-%m-%d %H:%M:%S')，基于官方 master 分支最新代码。"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          body: |
+            ### 🚀 ZeroClaw ARMv7 自动构建 (体积优化版)
+            本版本由 GitHub Actions 每日自动构建，同步官方最新源码。
+
+            **优化特性：**
+            - **体积压缩**：开启 `opt-level: z` 和 `strip`，显著减小磁盘占用。
+            - **性能增强**：开启 `LTO` 全局链接优化。
+            - **源码同步**：构建基于官方 `master` 分支最新提交。
+
+            **设备建议**：推荐玩客云 (OneCloud) 或同架构 ARMv7 设备使用。
