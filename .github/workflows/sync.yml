@@ -1,0 +1,32 @@
+name: Upstream Sync
+
+on:
+  schedule:
+    - cron: '0 3 * * *' # 每天北京时间 11:00 运行（比构建任务早一小时）
+  workflow_dispatch:    # 允许手动触发
+
+jobs:
+  sync_latest_from_upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target repo
+        uses: actions/checkout@v4
+        with:
+          ref: master # 你的仓库分支
+          fetch-depth: 0
+
+      - name: Sync upstream changes
+        id: sync
+        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4.1
+        with:
+          target_sync_branch: master
+          target_repo_token: ${{ secrets.GITHUB_TOKEN }}
+          upstream_sync_repo: zeroclaw-labs/zeroclaw
+          upstream_sync_branch: master
+          test_mode: false
+
+      - name: Check for Failure
+        if: failure()
+        run: |
+          echo "同步失败，可能是因为产生了代码冲突，请手动处理。"
+          exit 1
