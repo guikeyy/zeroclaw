@@ -23,7 +23,16 @@ jobs:
           VERSION=$(grep "^version =" Cargo.toml | head -1 | cut -d '"' -f 2)
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
           echo "检测到版本号: $VERSION"
-
+          
+      - name: Optimize Cargo.toml for Size
+        run: |
+          echo "[profile.release]" >> Cargo.toml
+          echo "opt-level = 'z'" >> Cargo.toml
+          echo "lto = true" >> Cargo.toml
+          echo "codegen-units = 1" >> Cargo.toml
+          echo "panic = 'abort'" >> Cargo.toml
+          echo "strip = true" >> Cargo.toml
+          
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
