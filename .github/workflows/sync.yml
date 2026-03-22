@@ -8,10 +8,9 @@ on:
 jobs:
   sync_latest_from_upstream:
     runs-on: ubuntu-latest
-    # 必须声明权限，否则无法推送合并后的代码
+    # 简化权限设置，只保留最基础的内容写入权限
     permissions:
       contents: write
-      workflows: write
 
     steps:
       - name: Checkout target repo
@@ -19,7 +18,7 @@ jobs:
         with:
           ref: master
           fetch-depth: 0
-          # 使用 GITHUB_TOKEN 进行操作
+          # 显式使用内置的 TOKEN
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Configure Git
@@ -34,24 +33,21 @@ jobs:
           git fetch upstream master
 
           # 2. 尝试合并上游 master，但不立即提交
-          # 使用 --no-commit 允许我们在提交前进行“拦截”修改
-          git merge upstream/master --no-commit --allow-unrelated-histories || echo "Detected conflicts, attempting to resolve..."
+          # --no-commit 允许我们在 commit 前拦截并恢复 .github 文件夹
+          git merge upstream/master --no-commit --allow-unrelated-histories || echo "Detected conflicts, but will attempt to protect local files..."
 
-          # 3. 【核心步骤】保护本地工作流
-          # 强制将 .github 文件夹恢复到合并前的状态（即你手动清理后的状态）
-          # 这样即使上游更新了 workflows，也不会推送到你的仓库，也就不会报权限错误
+          # 3. 【核心保护逻辑】强制恢复本地工作流目录
+          # 这行命令会将 .github/workflows 文件夹恢复到合并前的状态（即只剩你那两个 yml）
+          # 因为没有修改工作流文件，所以 push 时不需要 workflows: write 权限
           git checkout HEAD -- .github/workflows
 
-          # 4. 提交合并结果
-          # 如果没有变化（代码已同步），git commit 会报错，所以加上 || true
-          git commit -m "chore: sync upstream source code and protect local workflows" || echo "No changes to sync."
-
-          # 5. 推送到 origin
+          # 4. 提交并推送
+          # 如果没有任何代码更新，commit 会返回非零，所以加 || true 保证流程继续
+          git commit -m "chore: sync source code and keep local workflows" || echo "No changes to sync."
           git push origin master
 
       - name: Check for Failure
         if: failure()
         run: |
-          echo "同步失败！这通常是因为源码部分产生了严重的逻辑冲突。"
-          echo "请访问你的仓库手动执行 'Sync fork' 或通过本地 Git 解决冲突。"
+          echo "同步失败！请检查是否存在代码冲突。"
           exit 1
