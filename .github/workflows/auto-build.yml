@@ -2,23 +2,23 @@ name: Scheduled Build ZeroClaw (ARMv7 Optimized)
 
 on:
   schedule:
-    - cron: '0 4 * * *' # 每天北京时间 12:00 运行
-  workflow_dispatch:    # 允许手动触发
+    - cron: '0 4 * * *'
+  workflow_dispatch:
 
 jobs:
-  check_and_build:
+  build_official_latest:
     runs-on: ubuntu-latest
+    # 显式声明权限，防止 Release 失败
     permissions:
       contents: write
-    
     steps:
       - name: Checkout Upstream Master
         uses: actions/checkout@v4
         with:
           repository: zeroclaw-labs/zeroclaw
           ref: master
-          fetch-depth: 2 # 需要至少 2 层深度来对比 commit
-
+          fetch-depth: 2
+          
       - name: Check for Changes (Smart Skip)
         id: check_changes
         run: |
@@ -59,9 +59,9 @@ jobs:
 
           echo "IS_BETA=$IS_BETA" >> $GITHUB_OUTPUT
           echo "VERSION=$DISPLAY_VER" >> $GITHUB_OUTPUT
-
+    
       - name: Optimize Cargo.toml for Size
-       run: |
+        run: |
           # 移除原有的 profile.release 及其之后的内容
           sed -i '/\[profile.release\]/,$d' Cargo.toml
           # 追加极致体积优化配置
@@ -74,47 +74,41 @@ jobs:
           echo "strip = true" >> Cargo.toml        # 剥离所有调试符号表
           echo "--- 修改后的 Cargo.toml 尾部 ---"
           tail -n 10 Cargo.toml
-
+          
       - name: Install Rust Toolchain
-        if: steps.check_changes.outputs.CHANGED == 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: armv7-unknown-linux-gnueabihf
 
       - name: Install Cross
-        if: steps.check_changes.outputs.CHANGED == 'true'
         run: cargo install cross --git https://github.com/cross-rs/cross.git
 
       - name: Build for ARMv7
-        if: steps.check_changes.outputs.CHANGED == 'true'
-        run: cross build --target armv7-unknown-linux-gnueabihf --release
-
+        run: |
+          cross build --target armv7-unknown-linux-gnueabihf --release
       - name: Package Binary
-        if: steps.check_changes.outputs.CHANGED == 'true'
         run: |
           cd target/armv7-unknown-linux-gnueabihf/release
-          VER="${{ steps.get_version.outputs.VERSION }}"
-          FILENAME="zeroclaw-v${VER}-armv7-optimized.tar.gz"
+          FILENAME="zeroclaw-v${{ steps.get_version.outputs.VERSION }}-armv7-optimized.tar.gz"
           tar -czvf $FILENAME zeroclaw
           mv $FILENAME ../../../
           echo "FILENAME=$FILENAME" >> $GITHUB_ENV
-
+          
       - name: Create Release
-        if: steps.check_changes.outputs.CHANGED == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.get_version.outputs.VERSION }}
-          name: ${{ steps.get_version.outputs.IS_BETA == 'true' && '预览版' || '正式版' }} v${{ steps.get_version.outputs.VERSION }}
-          prerelease: ${{ steps.get_version.outputs.IS_BETA == 'true' }}
-          make_latest: ${{ steps.get_version.outputs.IS_BETA == 'false' }}
+          name: Release v${{ steps.get_version.outputs.VERSION }} (Optimized)
           files: ${{ env.FILENAME }}
           body: |
-            ### 🚀 ZeroClaw ARMv7 自动构建
+            ### 🚀 ZeroClaw ARMv7 自动构建 (体积优化版)
+            本版本由 GitHub Actions 每日自动构建，同步官方最新源码。
+            **优化特性：**
+            - **体积压缩**：开启 `opt-level: z` 和 `strip`，显著减小磁盘占用。
+            - **性能增强**：开启 `LTO` 全局链接优化。
+            - **源码同步**：构建基于官方 `master` 分支最新提交。
+            **设备建议**：推荐玩客云 (OneCloud) 或同架构 ARMv7 设备使用。
             ${{ steps.get_version.outputs.IS_BETA == 'true' && '⚠️ 本版本为每日预览版，基于最新代码。' || '✅ 本版本为同步官方发布的正式稳定版。' }}
-
             - **源码版本**: `${{ steps.get_version.outputs.VERSION }}`
             - **Commit**: `${{ steps.check_changes.outputs.COMMIT_ID }}`
             - **构建时间**: $(date +'%Y-%m-%d %H:%M:%S')
-
-            ---
-            *此版本由 GitHub Actions 自动生成。*
