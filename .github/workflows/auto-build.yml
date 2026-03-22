@@ -10,7 +10,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # 必须：用于创建 Release 和 Tag
-    
     steps:
       - name: Checkout Upstream Master
         uses: actions/checkout@v4
@@ -66,6 +65,7 @@ jobs:
           echo "strip = true" >> Cargo.toml        # 剥离所有调试符号表
           echo "--- 修改后的 Cargo.toml 尾部 ---"
           tail -n 10 Cargo.toml
+
 
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
