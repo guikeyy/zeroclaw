@@ -2,54 +2,66 @@ name: Scheduled Build ZeroClaw (ARMv7 Optimized)
 
 on:
   schedule:
-    - cron: '0 4 * * *'
-  workflow_dispatch:
+    - cron: '0 4 * * *' # 每天北京时间 12:00 运行
+  workflow_dispatch:    # 允许手动触发
 
 jobs:
-  build_official_latest:
+  check_and_build:
     runs-on: ubuntu-latest
-    # 显式声明权限，防止 Release 失败
     permissions:
       contents: write
+    
     steps:
       - name: Checkout Upstream Master
         uses: actions/checkout@v4
         with:
           repository: zeroclaw-labs/zeroclaw
           ref: master
-          fetch-depth: 1
+          fetch-depth: 2 # 需要至少 2 层深度来对比 commit
 
-      - name: Log Upstream Commit Info
+      - name: Check for Changes (Smart Skip)
+        id: check_changes
         run: |
-          echo "Building from upstream commit:"
-          git log -1 --format="%H - %s (%cr)"
-      - name: Determine Version and Beta Status
+          # 获取上游最新的 Commit ID
+          LATEST_COMMIT=$(git rev-parse HEAD)
+          # 获取本项目上一次成功运行记录的 Commit ID (存储在缓存或环境变量中)
+          # 这里通过 GitHub API 简单比对当前仓库最新 Release 的描述信息是否包含该 ID
+          LAST_BUILD_COMMIT=$(curl -s https://api.github.com/repos/${{ github.repository }}/releases | grep -oP 'commit: \K[0-9a-f]+' | head -1 || echo "none")
+          
+          if [ "$LATEST_COMMIT" == "$LAST_BUILD_COMMIT" ]; then
+            echo "CHANGED=false" >> $GITHUB_OUTPUT
+            echo "代码未变动，跳过构建。"
+          else
+            echo "CHANGED=true" >> $GITHUB_OUTPUT
+            echo "检测到新提交: $LATEST_COMMIT"
+          fi
+          echo "COMMIT_ID=$LATEST_COMMIT" >> $GITHUB_OUTPUT
+
+      - name: Determine Version and Status
+        if: steps.check_changes.outputs.CHANGED == 'true'
         id: get_version
         run: |
-          # 1. 提取 Cargo.toml 中的原始版本
+          # 1. 提取 Cargo.toml 版本
           RAW_VER=$(grep "^version =" Cargo.toml | head -1 | cut -d '"' -f 2)
           
-          # 2. 获取上游官方最新的【正式稳定版】版本号
+          # 2. 获取上游官方最新的【正式稳定版】
           UPSTREAM_STABLE=$(curl -s https://api.github.com/repos/zeroclaw-labs/zeroclaw/releases/latest | grep '"tag_name":' | sed -E 's/.*"v?([^"]+)".*/\1/')
           
-          echo "Cargo.toml Version: $RAW_VER"
-          echo "Upstream Stable Version: $UPSTREAM_STABLE"
-
           # 3. 判定逻辑
           IS_BETA="false"
           DISPLAY_VER="$RAW_VER"
           
           if [[ "$RAW_VER" == *"-beta"* ]] || [[ "$RAW_VER" != "$UPSTREAM_STABLE" ]]; then
             IS_BETA="true"
-            if [[ "$RAW_VER" != *"-beta"* ]]; then
-               DISPLAY_VER="${RAW_VER}-beta"
-            fi
+            # 预览版加上时间戳后缀，确保版本号唯一且可追溯
+            DISPLAY_VER="${RAW_VER}-beta.$(date +'%Y%m%d')"
           fi
 
           echo "IS_BETA=$IS_BETA" >> $GITHUB_OUTPUT
           echo "VERSION=$DISPLAY_VER" >> $GITHUB_OUTPUT
+
       - name: Optimize Cargo.toml for Size
-        run: |
+       run: |
           # 移除原有的 profile.release 及其之后的内容
           sed -i '/\[profile.release\]/,$d' Cargo.toml
           # 追加极致体积优化配置
@@ -62,38 +74,47 @@ jobs:
           echo "strip = true" >> Cargo.toml        # 剥离所有调试符号表
           echo "--- 修改后的 Cargo.toml 尾部 ---"
           tail -n 10 Cargo.toml
+
       - name: Install Rust Toolchain
+        if: steps.check_changes.outputs.CHANGED == 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: armv7-unknown-linux-gnueabihf
 
       - name: Install Cross
+        if: steps.check_changes.outputs.CHANGED == 'true'
         run: cargo install cross --git https://github.com/cross-rs/cross.git
 
       - name: Build for ARMv7
-        run: |
-          cross build --target armv7-unknown-linux-gnueabihf --release
+        if: steps.check_changes.outputs.CHANGED == 'true'
+        run: cross build --target armv7-unknown-linux-gnueabihf --release
+
       - name: Package Binary
+        if: steps.check_changes.outputs.CHANGED == 'true'
         run: |
           cd target/armv7-unknown-linux-gnueabihf/release
-          FILENAME="zeroclaw-v${{ steps.get_version.outputs.VERSION }}-armv7-optimized.tar.gz"
+          VER="${{ steps.get_version.outputs.VERSION }}"
+          FILENAME="zeroclaw-v${VER}-armv7-optimized.tar.gz"
           tar -czvf $FILENAME zeroclaw
           mv $FILENAME ../../../
           echo "FILENAME=$FILENAME" >> $GITHUB_ENV
+
       - name: Create Release
+        if: steps.check_changes.outputs.CHANGED == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.get_version.outputs.VERSION }}
-          name: Release v${{ steps.get_version.outputs.VERSION }} (Optimized)
+          name: ${{ steps.get_version.outputs.IS_BETA == 'true' && '预览版' || '正式版' }} v${{ steps.get_version.outputs.VERSION }}
+          prerelease: ${{ steps.get_version.outputs.IS_BETA == 'true' }}
+          make_latest: ${{ steps.get_version.outputs.IS_BETA == 'false' }}
           files: ${{ env.FILENAME }}
           body: |
-            ### 🚀 ZeroClaw ARMv7 自动构建 (体积优化版)
-            本版本由 GitHub Actions 每日自动构建，同步官方最新源码。
-            **优化特性：**
-            - **体积压缩**：开启 `opt-level: z` 和 `strip`，显著减小磁盘占用。
-            - **性能增强**：开启 `LTO` 全局链接优化。
-            - **源码同步**：构建基于官方 `master` 分支最新提交。
-            **设备建议**：推荐玩客云 (OneCloud) 或同架构 ARMv7 设备使用。
-            **版本信息：**
-            - **版本号**: `v${{ steps.get_version.outputs.VERSION }}`
-            - **类型**: `${{ steps.get_version.outputs.IS_BETA == 'true' && '⚠️ 测试版 (Beta/Pre-release)' || '✅ 正式版 (Stable)' }}`
+            ### 🚀 ZeroClaw ARMv7 自动构建
+            ${{ steps.get_version.outputs.IS_BETA == 'true' && '⚠️ 本版本为每日预览版，基于最新代码。' || '✅ 本版本为同步官方发布的正式稳定版。' }}
+
+            - **源码版本**: `${{ steps.get_version.outputs.VERSION }}`
+            - **Commit**: `${{ steps.check_changes.outputs.COMMIT_ID }}`
+            - **构建时间**: $(date +'%Y-%m-%d %H:%M:%S')
+
+            ---
+            *此版本由 GitHub Actions 自动生成。*
