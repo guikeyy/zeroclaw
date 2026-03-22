@@ -28,22 +28,27 @@ jobs:
 
       - name: Sync upstream changes
         run: |
-          # 1. 添加上游仓库并获取数据
+          # 1. 添加上游并获取
           git remote add upstream https://github.com/zeroclaw-labs/zeroclaw.git
           git fetch upstream master
 
-          # 2. 尝试合并上游 master，但不立即提交
-          # --no-commit 允许我们在 commit 前拦截并恢复 .github 文件夹
-          git merge upstream/master --no-commit --allow-unrelated-histories || echo "Detected conflicts, but will attempt to protect local files..."
+          # 2. 尝试合并，如果失败也继续执行
+          # 我们使用 -X ours 策略，但这通常对删除冲突效果有限，所以后面配合强制清理
+          git merge upstream/master --no-commit --allow-unrelated-histories || echo "Handling conflicts..."
 
-          # 3. 【核心保护逻辑】强制恢复本地工作流目录
-          # 这行命令会将 .github/workflows 文件夹恢复到合并前的状态（即只剩你那两个 yml）
-          # 因为没有修改工作流文件，所以 push 时不需要 workflows: write 权限
+          # 3. 【核心修复】解决删除/修改冲突
+          # 这一步会将所有处于“未合并”状态的官方工作流文件彻底移除
+          git rm .github/workflows/*.yml --cached || echo "No remote workflows to remove"
+          
+          # 4. 【核心保护】恢复你自己的工作流文件
+          # 确保仓库里只剩下你手动清理后保留的那两个文件
           git checkout HEAD -- .github/workflows
 
-          # 4. 提交并推送
-          # 如果没有任何代码更新，commit 会返回非零，所以加 || true 保证流程继续
-          git commit -m "chore: sync source code and keep local workflows" || echo "No changes to sync."
+          # 5. 提交合并
+          # 使用 -a 自动暂存所有变更（包括冲突解决后的删除操作）
+          git commit -a -m "chore: sync source code and resolve workflow conflicts" || echo "No changes to sync."
+
+          # 6. 推送
           git push origin master
 
       - name: Check for Failure
