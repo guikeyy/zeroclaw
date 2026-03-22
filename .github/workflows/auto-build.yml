@@ -2,15 +2,15 @@ name: Scheduled Build ZeroClaw (ARMv7 Optimized)
 
 on:
   schedule:
-    - cron: '0 4 * * *'
+    - cron: '0 4 * * *' # 每天北京时间 12:00 运行
   workflow_dispatch:
 
 jobs:
   build_official_latest:
     runs-on: ubuntu-latest
-    # 显式声明权限，防止 Release 失败
     permissions:
-      contents: write
+      contents: write # 必须：用于创建 Release 和 Tag
+    
     steps:
       - name: Checkout Upstream Master
         uses: actions/checkout@v4
@@ -24,15 +24,36 @@ jobs:
           echo "Building from upstream commit:"
           git log -1 --format="%H - %s (%cr)"
 
-      - name: Extract Version
+      - name: Determine Version and Beta Status
         id: get_version
         run: |
-          VERSION=$(grep "^version =" Cargo.toml | head -1 | cut -d '"' -f 2)
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-          echo "Target Version: $VERSION"
+          # 1. 提取 Cargo.toml 中的原始版本
+          RAW_VER=$(grep "^version =" Cargo.toml | head -1 | cut -d '"' -f 2)
+          
+          # 2. 获取上游官方最新的【正式稳定版】版本号
+          UPSTREAM_STABLE=$(curl -s https://api.github.com/repos/zeroclaw-labs/zeroclaw/releases/latest | grep '"tag_name":' | sed -E 's/.*"v?([^"]+)".*/\1/')
+          
+          echo "Cargo.toml Version: $RAW_VER"
+          echo "Upstream Stable Version: $UPSTREAM_STABLE"
+
+          # 3. 判定逻辑：如果版本号含字母，或者版本号高于上游稳定版，则视为 Beta
+          IS_BETA="false"
+          DISPLAY_VER="$RAW_VER"
+          
+          if [[ "$RAW_VER" == *"-beta"* ]] || [[ "$RAW_VER" != "$UPSTREAM_STABLE" ]]; then
+            IS_BETA="true"
+            # 如果原版本号不含 beta，我们手动加上方便管理程序识别
+            if [[ "$RAW_VER" != *"-beta"* ]]; then
+               DISPLAY_VER="${RAW_VER}-beta"
+            fi
+          fi
+
+          echo "IS_BETA=$IS_BETA" >> $GITHUB_OUTPUT
+          echo "VERSION=$DISPLAY_VER" >> $GITHUB_OUTPUT
+          echo "Final Version Label: $DISPLAY_VER (Is Beta: $IS_BETA)"
 
       - name: Optimize Cargo.toml for Size
-        run: |
+       run: |
           # 移除原有的 profile.release 及其之后的内容
           sed -i '/\[profile.release\]/,$d' Cargo.toml
           # 追加极致体积优化配置
@@ -45,6 +66,7 @@ jobs:
           echo "strip = true" >> Cargo.toml        # 剥离所有调试符号表
           echo "--- 修改后的 Cargo.toml 尾部 ---"
           tail -n 10 Cargo.toml
+
 
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -61,7 +83,9 @@ jobs:
       - name: Package Binary
         run: |
           cd target/armv7-unknown-linux-gnueabihf/release
-          FILENAME="zeroclaw-v${{ steps.get_version.outputs.VERSION }}-armv7-optimized.tar.gz"
+          VER="${{ steps.get_version.outputs.VERSION }}"
+          # 文件名区分 beta
+          FILENAME="zeroclaw-v${VER}-armv7-optimized.tar.gz"
           tar -czvf $FILENAME zeroclaw
           mv $FILENAME ../../../
           echo "FILENAME=$FILENAME" >> $GITHUB_ENV
@@ -71,10 +95,16 @@ jobs:
         with:
           tag_name: v${{ steps.get_version.outputs.VERSION }}
           name: Release v${{ steps.get_version.outputs.VERSION }} (Optimized)
+          # 关键点：如果是 Beta，自动标记为 Pre-release
+          prerelease: ${{ steps.get_version.outputs.IS_BETA == 'true' }}
           files: ${{ env.FILENAME }}
           body: |
             ### 🚀 ZeroClaw ARMv7 自动构建 (体积优化版)
             本版本由 GitHub Actions 每日自动构建，同步官方最新源码。
+
+            **版本信息：**
+            - **版本号**: `v${{ steps.get_version.outputs.VERSION }}`
+            - **类型**: `${{ steps.get_version.outputs.IS_BETA == 'true' && '⚠️ 测试版 (Beta/Pre-release)' || '✅ 正式版 (Stable)' }}`
 
             **优化特性：**
             - **体积压缩**：开启 `opt-level: z` 和 `strip`，显著减小磁盘占用。
