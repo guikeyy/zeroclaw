@@ -1,32 +1,57 @@
-name: Upstream Sync
+name: Upstream Sync (Protected Workflows)
 
 on:
   schedule:
-    - cron: '0 3 * * *' # 每天北京时间 11:00 运行（比构建任务早一小时）
+    - cron: '0 3 * * *' # 每天北京时间 11:00 运行
   workflow_dispatch:    # 允许手动触发
 
 jobs:
   sync_latest_from_upstream:
     runs-on: ubuntu-latest
+    # 必须声明权限，否则无法推送合并后的代码
+    permissions:
+      contents: write
+      workflows: write
+
     steps:
       - name: Checkout target repo
         uses: actions/checkout@v4
         with:
-          ref: master # 你的仓库分支
+          ref: master
           fetch-depth: 0
+          # 使用 GITHUB_TOKEN 进行操作
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Sync upstream changes
-        id: sync
-        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4.1
-        with:
-          target_sync_branch: master
-          target_repo_token: ${{ secrets.GITHUB_TOKEN }}
-          upstream_sync_repo: zeroclaw-labs/zeroclaw
-          upstream_sync_branch: master
-          test_mode: false
+        run: |
+          # 1. 添加上游仓库并获取数据
+          git remote add upstream https://github.com/zeroclaw-labs/zeroclaw.git
+          git fetch upstream master
+
+          # 2. 尝试合并上游 master，但不立即提交
+          # 使用 --no-commit 允许我们在提交前进行“拦截”修改
+          git merge upstream/master --no-commit --allow-unrelated-histories || echo "Detected conflicts, attempting to resolve..."
+
+          # 3. 【核心步骤】保护本地工作流
+          # 强制将 .github 文件夹恢复到合并前的状态（即你手动清理后的状态）
+          # 这样即使上游更新了 workflows，也不会推送到你的仓库，也就不会报权限错误
+          git checkout HEAD -- .github/workflows
+
+          # 4. 提交合并结果
+          # 如果没有变化（代码已同步），git commit 会报错，所以加上 || true
+          git commit -m "chore: sync upstream source code and protect local workflows" || echo "No changes to sync."
+
+          # 5. 推送到 origin
+          git push origin master
 
       - name: Check for Failure
         if: failure()
         run: |
-          echo "同步失败，可能是因为产生了代码冲突，请手动处理。"
+          echo "同步失败！这通常是因为源码部分产生了严重的逻辑冲突。"
+          echo "请访问你的仓库手动执行 'Sync fork' 或通过本地 Git 解决冲突。"
           exit 1
