@@ -10,6 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # 必须：用于创建 Release 和 Tag
+    
     steps:
       - name: Checkout Upstream Master
         uses: actions/checkout@v4
@@ -35,13 +36,12 @@ jobs:
           echo "Cargo.toml Version: $RAW_VER"
           echo "Upstream Stable Version: $UPSTREAM_STABLE"
 
-          # 3. 判定逻辑：如果版本号含字母，或者版本号高于上游稳定版，则视为 Beta
+          # 3. 判定逻辑
           IS_BETA="false"
           DISPLAY_VER="$RAW_VER"
           
           if [[ "$RAW_VER" == *"-beta"* ]] || [[ "$RAW_VER" != "$UPSTREAM_STABLE" ]]; then
             IS_BETA="true"
-            # 如果原版本号不含 beta，我们手动加上方便管理程序识别
             if [[ "$RAW_VER" != *"-beta"* ]]; then
                DISPLAY_VER="${RAW_VER}-beta"
             fi
@@ -49,10 +49,9 @@ jobs:
 
           echo "IS_BETA=$IS_BETA" >> $GITHUB_OUTPUT
           echo "VERSION=$DISPLAY_VER" >> $GITHUB_OUTPUT
-          echo "Final Version Label: $DISPLAY_VER (Is Beta: $IS_BETA)"
 
       - name: Optimize Cargo.toml for Size
-       run: |
+        run: |
           # 移除原有的 profile.release 及其之后的内容
           sed -i '/\[profile.release\]/,$d' Cargo.toml
           # 追加极致体积优化配置
@@ -65,7 +64,6 @@ jobs:
           echo "strip = true" >> Cargo.toml        # 剥离所有调试符号表
           echo "--- 修改后的 Cargo.toml 尾部 ---"
           tail -n 10 Cargo.toml
-
 
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -83,7 +81,6 @@ jobs:
         run: |
           cd target/armv7-unknown-linux-gnueabihf/release
           VER="${{ steps.get_version.outputs.VERSION }}"
-          # 文件名区分 beta
           FILENAME="zeroclaw-v${VER}-armv7-optimized.tar.gz"
           tar -czvf $FILENAME zeroclaw
           mv $FILENAME ../../../
@@ -94,20 +91,12 @@ jobs:
         with:
           tag_name: v${{ steps.get_version.outputs.VERSION }}
           name: Release v${{ steps.get_version.outputs.VERSION }} (Optimized)
-          # 关键点：如果是 Beta，自动标记为 Pre-release
           prerelease: ${{ steps.get_version.outputs.IS_BETA == 'true' }}
           files: ${{ env.FILENAME }}
           body: |
             ### 🚀 ZeroClaw ARMv7 自动构建 (体积优化版)
-            本版本由 GitHub Actions 每日自动构建，同步官方最新源码。
+            本版本由 GitHub Actions 每日自动构建。
 
             **版本信息：**
             - **版本号**: `v${{ steps.get_version.outputs.VERSION }}`
             - **类型**: `${{ steps.get_version.outputs.IS_BETA == 'true' && '⚠️ 测试版 (Beta/Pre-release)' || '✅ 正式版 (Stable)' }}`
-
-            **优化特性：**
-            - **体积压缩**：开启 `opt-level: z` 和 `strip`，显著减小磁盘占用。
-            - **性能增强**：开启 `LTO` 全局链接优化。
-            - **源码同步**：构建基于官方 `master` 分支最新提交。
-
-            **设备建议**：推荐玩客云 (OneCloud) 或同架构 ARMv7 设备使用。
