@@ -66,15 +66,18 @@ pub mod mcp_protocol;
 pub mod mcp_tool;
 pub mod mcp_transport;
 pub mod memory_forget;
+pub mod memory_purge;
 pub mod memory_recall;
 pub mod memory_store;
 pub mod microsoft365;
 pub mod model_routing_config;
 pub mod model_switch;
+pub mod node_capabilities;
 pub mod node_tool;
 pub mod notion_tool;
 pub mod opencode_cli;
 pub mod pdf_read;
+pub mod pipeline;
 pub mod poll;
 pub mod project_intel;
 pub mod proxy_config;
@@ -157,6 +160,7 @@ pub use mcp_client::McpRegistry;
 pub use mcp_deferred::{ActivatedToolSet, DeferredMcpToolSet};
 pub use mcp_tool::McpToolWrapper;
 pub use memory_forget::MemoryForgetTool;
+pub use memory_purge::MemoryPurgeTool;
 pub use memory_recall::MemoryRecallTool;
 pub use memory_store::MemoryStoreTool;
 pub use microsoft365::Microsoft365Tool;
@@ -410,7 +414,8 @@ pub fn all_tools_with_runtime(
         Arc::new(CronRunsTool::new(config.clone())),
         Arc::new(MemoryStoreTool::new(memory.clone(), security.clone())),
         Arc::new(MemoryRecallTool::new(memory.clone())),
-        Arc::new(MemoryForgetTool::new(memory, security.clone())),
+        Arc::new(MemoryForgetTool::new(memory.clone(), security.clone())),
+        Arc::new(MemoryPurgeTool::new(memory, security.clone())),
         Arc::new(ScheduleTool::new(security.clone(), root_config.clone())),
         Arc::new(ModelRoutingConfigTool::new(
             config.clone(),
@@ -466,6 +471,7 @@ pub fn all_tools_with_runtime(
             provider_timeout_secs: Some(root_config.provider_timeout_secs),
             extra_headers: root_config.extra_headers.clone(),
             api_path: root_config.api_path.clone(),
+            provider_max_tokens: root_config.provider_max_tokens,
         };
         tool_arcs.push(Arc::new(LlmTaskTool::new(
             security.clone(),
@@ -547,6 +553,7 @@ pub fn all_tools_with_runtime(
             web_fetch_config.max_response_size,
             web_fetch_config.timeout_secs,
             web_fetch_config.firecrawl.clone(),
+            web_fetch_config.allowed_private_hosts.clone(),
         )));
     }
 
@@ -894,6 +901,7 @@ pub fn all_tools_with_runtime(
         reasoning_enabled: root_config.runtime.reasoning_enabled,
         reasoning_effort: root_config.runtime.reasoning_effort.clone(),
         provider_timeout_secs: Some(root_config.provider_timeout_secs),
+        provider_max_tokens: root_config.provider_max_tokens,
         extra_headers: root_config.extra_headers.clone(),
         api_path: root_config.api_path.clone(),
     };
@@ -1009,6 +1017,15 @@ pub fn all_tools_with_runtime(
                 }
             }
         }
+    }
+
+    // Pipeline tool (execute_pipeline) — multi-step tool chaining.
+    if root_config.pipeline.enabled {
+        let pipeline_tools: Vec<Arc<dyn Tool>> = tool_arcs.clone();
+        tool_arcs.push(Arc::new(pipeline::PipelineTool::new(
+            root_config.pipeline.clone(),
+            pipeline_tools,
+        )));
     }
 
     (

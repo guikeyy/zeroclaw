@@ -113,6 +113,18 @@ pub trait Channel: Send + Sync {
         Ok(())
     }
 
+    /// Show a progress/status update (e.g. tool execution status).
+    /// Channels can display this in a status bar rather than in the message body.
+    /// Default: no-op (progress is ignored).
+    async fn update_draft_progress(
+        &self,
+        _recipient: &str,
+        _message_id: &str,
+        _text: &str,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     /// Finalize a draft with the complete response (e.g. apply Markdown formatting).
     async fn finalize_draft(
         &self,
@@ -159,6 +171,20 @@ pub trait Channel: Send + Sync {
 
     /// Unpin a previously pinned message.
     async fn unpin_message(&self, _channel_id: &str, _message_id: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Redact (delete) a message from the channel.
+    ///
+    /// `channel_id` is the platform channel/conversation identifier.
+    /// `message_id` is the platform-scoped message identifier.
+    /// `reason` is an optional reason for the redaction (may be visible in audit logs).
+    async fn redact_message(
+        &self,
+        _channel_id: &str,
+        _message_id: &str,
+        _reason: Option<String>,
+    ) -> anyhow::Result<()> {
         Ok(())
     }
 }
@@ -278,5 +304,19 @@ mod tests {
         assert_eq!(received.sender, "tester");
         assert_eq!(received.content, "hello");
         assert_eq!(received.channel, "dummy");
+    }
+
+    #[tokio::test]
+    async fn default_redact_message_returns_success() {
+        let channel = DummyChannel;
+
+        assert!(channel
+            .redact_message("chan_1", "msg_1", Some("spam".to_string()))
+            .await
+            .is_ok());
+        assert!(channel
+            .redact_message("chan_1", "msg_2", None)
+            .await
+            .is_ok());
     }
 }

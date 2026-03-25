@@ -39,6 +39,7 @@ const SUPPORTED_PROXY_SERVICE_KEYS: &[&str] = &[
     "tool.composio",
     "tool.http_request",
     "tool.pushover",
+    "tool.web_search",
     "memory.embeddings",
     "tunnel.custom",
     "transcription.groq",
@@ -100,6 +101,14 @@ pub struct Config {
     /// that need more time processing large contexts.
     #[serde(default = "default_provider_timeout_secs")]
     pub provider_timeout_secs: u64,
+
+    /// Maximum output tokens to include in LLM provider API requests.
+    ///
+    /// When set, overrides each provider's built-in default. This is especially
+    /// important for OpenRouter where the platform default (65536) can cause 402
+    /// errors for models with lower output limits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_max_tokens: Option<u32>,
 
     /// Extra HTTP headers to include in LLM provider API requests.
     ///
@@ -172,6 +181,10 @@ pub struct Config {
     /// Skills loading and community repository behavior (`[skills]`).
     #[serde(default)]
     pub skills: SkillsConfig,
+
+    /// Pipeline tool configuration (`[pipeline]`).
+    #[serde(default)]
+    pub pipeline: PipelineConfig,
 
     /// Model routing rules — route `hint:<name>` to specific provider+model combos.
     #[serde(default)]
@@ -493,6 +506,12 @@ pub struct ModelProviderConfig {
     /// Azure OpenAI API version (defaults to "2024-08-01-preview").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub azure_openai_api_version: Option<String>,
+    /// Optional maximum output tokens to send in API requests.
+    /// When set, overrides the provider's default `max_tokens` value.
+    /// Useful for providers like OpenRouter where the platform default (65536)
+    /// may exceed a model's actual limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
 }
 
 // ── Delegate Tool Configuration ─────────────────────────────────
@@ -1326,6 +1345,18 @@ pub struct AgentConfig {
     /// Enable context-aware tool filtering (only surface relevant tools per iteration).
     #[serde(default)]
     pub context_aware_tools: bool,
+
+    /// Post-response quality evaluator configuration.
+    #[serde(default)]
+    pub eval: crate::agent::eval::EvalConfig,
+
+    /// Automatic complexity-based classification fallback.
+    #[serde(default)]
+    pub auto_classify: Option<crate::agent::eval::AutoClassifyConfig>,
+
+    /// Context compression configuration for automatic conversation compaction.
+    #[serde(default)]
+    pub context_compression: crate::agent::context_compressor::ContextCompressionConfig,
 }
 
 fn default_agent_max_tool_iterations() -> usize {
@@ -1363,6 +1394,10 @@ impl Default for AgentConfig {
             thinking: crate::agent::thinking::ThinkingConfig::default(),
             history_pruning: crate::agent::history_pruner::HistoryPrunerConfig::default(),
             context_aware_tools: false,
+            eval: crate::agent::eval::EvalConfig::default(),
+            auto_classify: None,
+            context_compression:
+                crate::agent::context_compressor::ContextCompressionConfig::default(),
         }
     }
 }
@@ -1486,6 +1521,9 @@ pub struct SkillsConfig {
     /// Autonomous skill creation from successful multi-step task executions.
     #[serde(default)]
     pub skill_creation: SkillCreationConfig,
+    /// Automatic skill self-improvement after successful skill usage.
+    #[serde(default)]
+    pub skill_improvement: SkillImprovementConfig,
 }
 
 /// Autonomous skill creation configuration (`[skills.skill_creation]` section).
@@ -1509,6 +1547,63 @@ impl Default for SkillCreationConfig {
             enabled: false,
             max_skills: 500,
             similarity_threshold: 0.85,
+        }
+    }
+}
+
+/// Skill self-improvement configuration (`[skills.auto_improve]` section).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SkillImprovementConfig {
+    /// Enable automatic skill improvement after successful skill usage.
+    /// Default: `true`.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Minimum interval (in seconds) between improvements for the same skill.
+    /// Default: `3600` (1 hour).
+    #[serde(default = "default_skill_improvement_cooldown")]
+    pub cooldown_secs: u64,
+}
+
+fn default_skill_improvement_cooldown() -> u64 {
+    3600
+}
+
+impl Default for SkillImprovementConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cooldown_secs: 3600,
+        }
+    }
+}
+
+/// Pipeline tool configuration (`[pipeline]` section).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PipelineConfig {
+    /// Enable the `execute_pipeline` meta-tool.
+    /// Default: `false`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Maximum number of steps allowed in a single pipeline invocation.
+    /// Default: `20`.
+    #[serde(default = "default_pipeline_max_steps")]
+    pub max_steps: usize,
+    /// Tools allowed in pipeline steps. Steps referencing tools not on this
+    /// list are rejected before execution.
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+}
+
+fn default_pipeline_max_steps() -> usize {
+    20
+}
+
+impl Default for PipelineConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_steps: 20,
+            allowed_tools: Vec::new(),
         }
     }
 }
@@ -1663,6 +1758,42 @@ pub struct CostConfig {
     /// Per-model pricing (USD per 1M tokens)
     #[serde(default)]
     pub prices: std::collections::HashMap<String, ModelPricing>,
+
+    /// Cost enforcement behavior when budget limits are approached or exceeded.
+    #[serde(default)]
+    pub enforcement: CostEnforcementConfig,
+}
+
+/// Configuration for cost enforcement behavior when budget limits are reached.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CostEnforcementConfig {
+    /// Enforcement mode: "warn", "block", or "route_down".
+    #[serde(default = "default_cost_enforcement_mode")]
+    pub mode: String,
+    /// Model hint to route to when budget is exceeded (used with "route_down" mode).
+    #[serde(default)]
+    pub route_down_model: Option<String>,
+    /// Reserve this percentage of budget for critical operations.
+    #[serde(default = "default_reserve_percent")]
+    pub reserve_percent: u8,
+}
+
+fn default_cost_enforcement_mode() -> String {
+    "warn".to_string()
+}
+
+fn default_reserve_percent() -> u8 {
+    10
+}
+
+impl Default for CostEnforcementConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_cost_enforcement_mode(),
+            route_down_model: None,
+            reserve_percent: default_reserve_percent(),
+        }
+    }
 }
 
 /// Per-model pricing entry (USD per 1M tokens).
@@ -1702,6 +1833,7 @@ impl Default for CostConfig {
             warn_at_percent: default_warn_percent(),
             allow_override: false,
             prices: get_default_pricing(),
+            enforcement: CostEnforcementConfig::default(),
         }
     }
 }
@@ -1902,6 +2034,10 @@ pub struct GatewayConfig {
     /// Pairing dashboard configuration
     #[serde(default)]
     pub pairing_dashboard: PairingDashboardConfig,
+
+    /// TLS configuration for the gateway server (`[gateway.tls]`).
+    #[serde(default)]
+    pub tls: Option<GatewayTlsConfig>,
 }
 
 fn default_gateway_port() -> u16 {
@@ -1958,6 +2094,7 @@ impl Default for GatewayConfig {
             session_persistence: true,
             session_ttl_hours: 0,
             pairing_dashboard: PairingDashboardConfig::default(),
+            tls: None,
         }
     }
 }
@@ -2008,6 +2145,38 @@ impl Default for PairingDashboardConfig {
             lockout_secs: default_pairing_lockout_secs(),
         }
     }
+}
+
+/// TLS configuration for the gateway server (`[gateway.tls]`).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GatewayTlsConfig {
+    /// Enable TLS for the gateway (default: false).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Path to the PEM-encoded server certificate file.
+    pub cert_path: String,
+    /// Path to the PEM-encoded server private key file.
+    pub key_path: String,
+    /// Client certificate authentication (mutual TLS) settings.
+    #[serde(default)]
+    pub client_auth: Option<GatewayClientAuthConfig>,
+}
+
+/// Client certificate authentication (mTLS) configuration (`[gateway.tls.client_auth]`).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GatewayClientAuthConfig {
+    /// Enable client certificate verification (default: false).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Path to the PEM-encoded CA certificate used to verify client certs.
+    pub ca_cert_path: String,
+    /// Reject connections that do not present a valid client certificate (default: true).
+    #[serde(default = "default_true")]
+    pub require_client_cert: bool,
+    /// Optional SHA-256 fingerprints for certificate pinning.
+    /// When non-empty, only client certs matching one of these fingerprints are accepted.
+    #[serde(default)]
+    pub pinned_certs: Vec<String>,
 }
 
 /// Secure transport configuration for inter-node communication (`[node_transport]`).
@@ -2363,6 +2532,9 @@ pub struct WebFetchConfig {
     /// Blocked domains (exact or subdomain match; always takes priority over allowed_domains)
     #[serde(default)]
     pub blocked_domains: Vec<String>,
+    /// Private/internal hosts allowed to bypass SSRF protection (e.g. `["192.168.1.10", "internal.local"]`)
+    #[serde(default)]
+    pub allowed_private_hosts: Vec<String>,
     /// Maximum response size in bytes (default: 500KB, plain text is much smaller than raw HTML)
     #[serde(default = "default_web_fetch_max_response_size")]
     pub max_response_size: usize,
@@ -2444,6 +2616,7 @@ impl Default for WebFetchConfig {
             enabled: true,
             allowed_domains: vec!["*".into()],
             blocked_domains: vec![],
+            allowed_private_hosts: vec![],
             max_response_size: default_web_fetch_max_response_size(),
             timeout_secs: default_web_fetch_timeout_secs(),
             firecrawl: FirecrawlConfig::default(),
@@ -3023,6 +3196,38 @@ pub struct PluginsConfig {
     /// Maximum number of plugins that can be loaded
     #[serde(default = "default_max_plugins")]
     pub max_plugins: usize,
+    /// Plugin signature verification security settings
+    #[serde(default)]
+    pub security: PluginSecurityConfig,
+}
+
+/// Plugin signature verification configuration (`[plugins.security]`).
+///
+/// Controls Ed25519 signature verification for plugin manifests.
+/// In `strict` mode, only plugins signed by a trusted publisher key are loaded.
+/// In `permissive` mode, unsigned or untrusted plugins produce warnings but are
+/// still loaded. In `disabled` mode (the default), no signature checking occurs.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PluginSecurityConfig {
+    /// Signature enforcement mode: "disabled", "permissive", or "strict".
+    #[serde(default = "default_signature_mode")]
+    pub signature_mode: String,
+    /// Hex-encoded Ed25519 public keys of trusted plugin publishers.
+    #[serde(default)]
+    pub trusted_publisher_keys: Vec<String>,
+}
+
+fn default_signature_mode() -> String {
+    "disabled".to_string()
+}
+
+impl Default for PluginSecurityConfig {
+    fn default() -> Self {
+        Self {
+            signature_mode: default_signature_mode(),
+            trusted_publisher_keys: Vec::new(),
+        }
+    }
 }
 
 fn default_plugins_dir() -> String {
@@ -3040,6 +3245,7 @@ impl Default for PluginsConfig {
             plugins_dir: default_plugins_dir(),
             auto_discover: false,
             max_plugins: default_max_plugins(),
+            security: PluginSecurityConfig::default(),
         }
     }
 }
@@ -4149,6 +4355,317 @@ fn apply_explicit_proxy_to_builder(
     builder
 }
 
+// ── Proxy-aware WebSocket connect ────────────────────────────────
+//
+// `tokio_tungstenite::connect_async` does not honour proxy settings.
+// The helpers below resolve the effective proxy URL for a given service
+// key and, when a proxy is active, establish a tunnelled TCP connection
+// (HTTP CONNECT for http/https proxies, SOCKS5 for socks5/socks5h)
+// before handing the stream to `tokio_tungstenite` for the WebSocket
+// handshake.
+
+/// Combined async IO trait for boxed WebSocket transport streams.
+trait AsyncReadWrite: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> AsyncReadWrite for T {}
+
+/// A boxed async IO stream used when a WebSocket connection is tunnelled
+/// through a proxy.  The concrete type varies depending on the proxy
+/// kind (HTTP CONNECT vs SOCKS5) and the target scheme (ws vs wss).
+///
+/// We wrap in a newtype so we can implement `AsyncRead` and `AsyncWrite`
+/// via delegation, since Rust trait objects cannot combine multiple
+/// non-auto traits.
+pub struct BoxedIo(Box<dyn AsyncReadWrite>);
+
+impl tokio::io::AsyncRead for BoxedIo {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut *self.0).poll_read(cx, buf)
+    }
+}
+
+impl tokio::io::AsyncWrite for BoxedIo {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut *self.0).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut *self.0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut *self.0).poll_shutdown(cx)
+    }
+}
+
+impl Unpin for BoxedIo {}
+
+/// Convenience alias for the WebSocket stream returned by the proxy-aware
+/// connect helpers.
+pub type ProxiedWsStream = tokio_tungstenite::WebSocketStream<BoxedIo>;
+
+/// Resolve the effective proxy URL for a WebSocket connection to the
+/// given `ws_url`, taking into account the per-channel `proxy_url`
+/// override, the runtime proxy config, scope and no_proxy list.
+fn resolve_ws_proxy_url(
+    service_key: &str,
+    ws_url: &str,
+    channel_proxy_url: Option<&str>,
+) -> Option<String> {
+    // 1. Explicit per-channel proxy always wins.
+    if let Some(url) = normalize_proxy_url_option(channel_proxy_url) {
+        return Some(url);
+    }
+
+    // 2. Consult the runtime proxy config.
+    let cfg = runtime_proxy_config();
+    if !cfg.should_apply_to_service(service_key) {
+        return None;
+    }
+
+    // Check the no_proxy list against the WebSocket target host.
+    if let Ok(parsed) = reqwest::Url::parse(ws_url) {
+        if let Some(host) = parsed.host_str() {
+            let no_proxy_entries = cfg.normalized_no_proxy();
+            if !no_proxy_entries.is_empty() {
+                let host_lower = host.to_ascii_lowercase();
+                let matches_no_proxy = no_proxy_entries.iter().any(|entry| {
+                    let entry = entry.trim().to_ascii_lowercase();
+                    if entry == "*" {
+                        return true;
+                    }
+                    if host_lower == entry {
+                        return true;
+                    }
+                    // Support ".example.com" matching "foo.example.com"
+                    if let Some(suffix) = entry.strip_prefix('.') {
+                        return host_lower.ends_with(suffix) || host_lower == suffix;
+                    }
+                    // Support "example.com" also matching "foo.example.com"
+                    host_lower.ends_with(&format!(".{entry}"))
+                });
+                if matches_no_proxy {
+                    return None;
+                }
+            }
+        }
+    }
+
+    // For wss:// prefer https_proxy, for ws:// prefer http_proxy, fall
+    // back to all_proxy in both cases.
+    let is_secure = ws_url.starts_with("wss://") || ws_url.starts_with("wss:");
+    let preferred = if is_secure {
+        normalize_proxy_url_option(cfg.https_proxy.as_deref())
+    } else {
+        normalize_proxy_url_option(cfg.http_proxy.as_deref())
+    };
+    preferred.or_else(|| normalize_proxy_url_option(cfg.all_proxy.as_deref()))
+}
+
+/// Connect a WebSocket through the configured proxy (if any).
+///
+/// When no proxy applies, this is a thin wrapper around
+/// `tokio_tungstenite::connect_async`.  When a proxy is active the
+/// function tunnels the TCP connection through the proxy before
+/// performing the WebSocket upgrade.
+///
+/// `service_key` is the proxy-service selector (e.g. `"channel.discord"`).
+/// `channel_proxy_url` is the optional per-channel proxy override.
+pub async fn ws_connect_with_proxy(
+    ws_url: &str,
+    service_key: &str,
+    channel_proxy_url: Option<&str>,
+) -> anyhow::Result<(
+    ProxiedWsStream,
+    tokio_tungstenite::tungstenite::http::Response<Option<Vec<u8>>>,
+)> {
+    let proxy_url = resolve_ws_proxy_url(service_key, ws_url, channel_proxy_url);
+
+    match proxy_url {
+        None => {
+            // No proxy — delegate directly.
+            let (stream, resp) = tokio_tungstenite::connect_async(ws_url).await?;
+            // Re-wrap the inner stream into our boxed type so the caller
+            // always gets `ProxiedWsStream`.
+            let inner = stream.into_inner();
+            let boxed = BoxedIo(Box::new(inner));
+            let ws = tokio_tungstenite::WebSocketStream::from_raw_socket(
+                boxed,
+                tokio_tungstenite::tungstenite::protocol::Role::Client,
+                None,
+            )
+            .await;
+            Ok((ws, resp))
+        }
+        Some(proxy) => ws_connect_via_proxy(ws_url, &proxy).await,
+    }
+}
+
+/// Establish a WebSocket connection tunnelled through the given proxy URL.
+async fn ws_connect_via_proxy(
+    ws_url: &str,
+    proxy_url: &str,
+) -> anyhow::Result<(
+    ProxiedWsStream,
+    tokio_tungstenite::tungstenite::http::Response<Option<Vec<u8>>>,
+)> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt as _};
+    use tokio::net::TcpStream;
+
+    let target =
+        reqwest::Url::parse(ws_url).with_context(|| format!("Invalid WebSocket URL: {ws_url}"))?;
+    let target_host = target
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("WebSocket URL has no host: {ws_url}"))?
+        .to_string();
+    let target_port = target
+        .port_or_known_default()
+        .unwrap_or(if target.scheme() == "wss" { 443 } else { 80 });
+
+    let proxy = reqwest::Url::parse(proxy_url)
+        .with_context(|| format!("Invalid proxy URL: {proxy_url}"))?;
+
+    let stream: BoxedIo = match proxy.scheme() {
+        "socks5" | "socks5h" | "socks" => {
+            let proxy_addr = format!(
+                "{}:{}",
+                proxy.host_str().unwrap_or("127.0.0.1"),
+                proxy.port_or_known_default().unwrap_or(1080)
+            );
+            let target_addr = format!("{target_host}:{target_port}");
+            let socks_stream = if proxy.username().is_empty() {
+                tokio_socks::tcp::Socks5Stream::connect(proxy_addr.as_str(), target_addr.as_str())
+                    .await
+                    .with_context(|| format!("SOCKS5 connect to {target_addr} via {proxy_addr}"))?
+            } else {
+                let password = proxy.password().unwrap_or("");
+                tokio_socks::tcp::Socks5Stream::connect_with_password(
+                    proxy_addr.as_str(),
+                    target_addr.as_str(),
+                    proxy.username(),
+                    password,
+                )
+                .await
+                .with_context(|| format!("SOCKS5 auth connect to {target_addr} via {proxy_addr}"))?
+            };
+            let tcp: TcpStream = socks_stream.into_inner();
+            BoxedIo(Box::new(tcp))
+        }
+        "http" | "https" => {
+            let proxy_host = proxy.host_str().unwrap_or("127.0.0.1");
+            let proxy_port = proxy.port_or_known_default().unwrap_or(8080);
+            let proxy_addr = format!("{proxy_host}:{proxy_port}");
+
+            let mut tcp = TcpStream::connect(&proxy_addr)
+                .await
+                .with_context(|| format!("TCP connect to HTTP proxy {proxy_addr}"))?;
+
+            // Send HTTP CONNECT request.
+            let connect_req = format!(
+                "CONNECT {target_host}:{target_port} HTTP/1.1\r\nHost: {target_host}:{target_port}\r\n\r\n"
+            );
+            tcp.write_all(connect_req.as_bytes()).await?;
+
+            // Read the response (we only need the status line).
+            let mut buf = vec![0u8; 4096];
+            let mut total = 0usize;
+            loop {
+                let n = tcp.read(&mut buf[total..]).await?;
+                if n == 0 {
+                    anyhow::bail!("HTTP CONNECT proxy closed connection before response");
+                }
+                total += n;
+                // Look for end of HTTP headers.
+                if let Some(pos) = find_header_end(&buf[..total]) {
+                    let status_line = std::str::from_utf8(&buf[..pos])
+                        .unwrap_or("")
+                        .lines()
+                        .next()
+                        .unwrap_or("");
+                    if !status_line.contains("200") {
+                        anyhow::bail!(
+                            "HTTP CONNECT proxy returned non-200 response: {status_line}"
+                        );
+                    }
+                    break;
+                }
+                if total >= buf.len() {
+                    anyhow::bail!("HTTP CONNECT proxy response too large");
+                }
+            }
+
+            BoxedIo(Box::new(tcp))
+        }
+        scheme => {
+            anyhow::bail!("Unsupported proxy scheme '{scheme}' for WebSocket connections");
+        }
+    };
+
+    // If the target is wss://, wrap in TLS.
+    let is_secure = target.scheme() == "wss";
+    let stream: BoxedIo = if is_secure {
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let tls_config = std::sync::Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_no_client_auth(),
+        );
+        let connector = tokio_rustls::TlsConnector::from(tls_config);
+        let server_name = rustls_pki_types::ServerName::try_from(target_host.clone())
+            .with_context(|| format!("Invalid TLS server name: {target_host}"))?;
+
+        // `stream` is `BoxedIo` — we need a concrete `AsyncRead + AsyncWrite`
+        // for `TlsConnector::connect`.  Since `BoxedIo` already satisfies
+        // those bounds we can pass it directly.
+        let tls_stream = connector
+            .connect(server_name, stream)
+            .await
+            .with_context(|| format!("TLS handshake with {target_host}"))?;
+        BoxedIo(Box::new(tls_stream))
+    } else {
+        stream
+    };
+
+    // Perform the WebSocket client handshake over the tunnelled stream.
+    let ws_request = tokio_tungstenite::tungstenite::http::Request::builder()
+        .uri(ws_url)
+        .header("Host", format!("{target_host}:{target_port}"))
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header(
+            "Sec-WebSocket-Key",
+            tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+        )
+        .header("Sec-WebSocket-Version", "13")
+        .body(())
+        .with_context(|| "Failed to build WebSocket upgrade request")?;
+
+    let (ws_stream, response) = tokio_tungstenite::client_async(ws_request, stream)
+        .await
+        .with_context(|| format!("WebSocket handshake failed for {ws_url}"))?;
+
+    Ok((ws_stream, response))
+}
+
+/// Find the `\r\n\r\n` boundary marking the end of HTTP headers.
+fn find_header_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
+}
+
 fn parse_proxy_scope(raw: &str) -> Option<ProxyScope> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "environment" | "env" => Some(ProxyScope::Environment),
@@ -4211,6 +4728,18 @@ pub struct StorageProviderConfig {
     /// Optional connection timeout in seconds for remote providers.
     #[serde(default)]
     pub connect_timeout_secs: Option<u64>,
+
+    /// Enable pgvector extension for hybrid vector+keyword recall.
+    #[serde(default)]
+    pub pgvector_enabled: bool,
+
+    /// Vector dimensions for pgvector embeddings (default: 1536).
+    #[serde(default = "default_pgvector_dimensions")]
+    pub pgvector_dimensions: usize,
+}
+
+fn default_pgvector_dimensions() -> usize {
+    1536
 }
 
 fn default_storage_schema() -> String {
@@ -4229,6 +4758,8 @@ impl Default for StorageProviderConfig {
             schema: default_storage_schema(),
             table: default_storage_table(),
             connect_timeout_secs: None,
+            pgvector_enabled: false,
+            pgvector_dimensions: default_pgvector_dimensions(),
         }
     }
 }
@@ -4269,6 +4800,19 @@ impl Default for QdrantConfig {
     }
 }
 
+/// Search strategy for memory recall.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchMode {
+    /// Pure keyword search (FTS5 BM25)
+    Bm25,
+    /// Pure vector/semantic search
+    Embedding,
+    /// Weighted combination of keyword + vector (default)
+    #[default]
+    Hybrid,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct MemoryConfig {
@@ -4306,6 +4850,9 @@ pub struct MemoryConfig {
     /// Weight for keyword BM25 in hybrid search (0.0–1.0)
     #[serde(default = "default_keyword_weight")]
     pub keyword_weight: f64,
+    /// Search strategy: bm25 (keyword only), embedding (vector only), or hybrid (both).
+    #[serde(default)]
+    pub search_mode: SearchMode,
     /// Minimum hybrid score (0.0–1.0) for a memory to be included in context.
     /// Memories scoring below this threshold are dropped to prevent irrelevant
     /// context from bleeding into conversations. Default: 0.4
@@ -4490,6 +5037,7 @@ impl Default for MemoryConfig {
             embedding_dimensions: default_embedding_dims(),
             vector_weight: default_vector_weight(),
             keyword_weight: default_keyword_weight(),
+            search_mode: SearchMode::default(),
             min_relevance_score: default_min_relevance_score(),
             embedding_cache_size: default_cache_size(),
             chunk_max_tokens: default_chunk_size(),
@@ -5550,6 +6098,8 @@ pub struct ChannelsConfig {
     pub reddit: Option<RedditConfig>,
     /// Bluesky channel configuration (AT Protocol).
     pub bluesky: Option<BlueskyConfig>,
+    /// Voice call channel configuration (Twilio/Telnyx/Plivo).
+    pub voice_call: Option<crate::channels::voice_call::VoiceCallConfig>,
     /// Voice wake word detection channel configuration.
     #[cfg(feature = "voice-wake")]
     pub voice_wake: Option<VoiceWakeConfig>,
@@ -5738,6 +6288,7 @@ impl Default for ChannelsConfig {
             clawdtalk: None,
             reddit: None,
             bluesky: None,
+            voice_call: None,
             #[cfg(feature = "voice-wake")]
             voice_wake: None,
             message_timeout_secs: default_channel_message_timeout_secs(),
@@ -5878,6 +6429,7 @@ impl ChannelConfig for DiscordHistoryConfig {
 
 /// Slack bot channel configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct SlackConfig {
     /// Slack bot OAuth token (xoxb-...).
     pub bot_token: String,
@@ -5886,6 +6438,10 @@ pub struct SlackConfig {
     /// Optional channel ID to restrict the bot to a single channel.
     /// Omit (or set `"*"`) to listen across all accessible channels.
     pub channel_id: Option<String>,
+    /// Optional explicit list of channel IDs to watch.
+    /// When set, this takes precedence over `channel_id`.
+    #[serde(default)]
+    pub channel_ids: Vec<String>,
     /// Allowed Slack user IDs. Empty = deny all.
     #[serde(default)]
     pub allowed_users: Vec<String>,
@@ -5901,10 +6457,25 @@ pub struct SlackConfig {
     /// Direct messages remain allowed.
     #[serde(default)]
     pub mention_only: bool,
+    /// Use the newer Slack `markdown` block type (12 000 char limit, richer formatting).
+    /// Defaults to false (uses universally supported `section` blocks with `mrkdwn`).
+    /// Enable this only if your Slack workspace supports the `markdown` block type.
+    #[serde(default)]
+    pub use_markdown_blocks: bool,
     /// Per-channel proxy URL (http, https, socks5, socks5h).
     /// Overrides the global `[proxy]` setting for this channel only.
     #[serde(default)]
     pub proxy_url: Option<String>,
+    /// Enable progressive draft message streaming via `chat.update`.
+    #[serde(default)]
+    pub stream_drafts: bool,
+    /// Minimum interval (ms) between draft message edits to avoid Slack rate limits.
+    #[serde(default = "default_slack_draft_update_interval_ms")]
+    pub draft_update_interval_ms: u64,
+}
+
+fn default_slack_draft_update_interval_ms() -> u64 {
+    1200
 }
 
 impl ChannelConfig for SlackConfig {
@@ -6456,6 +7027,53 @@ pub struct SecurityConfig {
     /// Nevis IAM integration for SSO/MFA authentication and role-based access.
     #[serde(default)]
     pub nevis: NevisConfig,
+
+    /// WebAuthn / FIDO2 hardware key authentication configuration.
+    #[serde(default)]
+    pub webauthn: WebAuthnConfig,
+}
+
+/// WebAuthn / FIDO2 hardware key authentication configuration (`[security.webauthn]`).
+///
+/// Enables registration and authentication via hardware security keys
+/// (YubiKey, SoloKey, etc.) and platform authenticators (Touch ID, Windows Hello).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WebAuthnConfig {
+    /// Enable WebAuthn authentication. Default: false.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Relying Party ID (domain name, e.g. "example.com"). Default: "localhost".
+    #[serde(default = "default_webauthn_rp_id")]
+    pub rp_id: String,
+    /// Relying Party origin URL (e.g. "https://example.com"). Default: "http://localhost:42617".
+    #[serde(default = "default_webauthn_rp_origin")]
+    pub rp_origin: String,
+    /// Relying Party display name. Default: "ZeroClaw".
+    #[serde(default = "default_webauthn_rp_name")]
+    pub rp_name: String,
+}
+
+impl Default for WebAuthnConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            rp_id: default_webauthn_rp_id(),
+            rp_origin: default_webauthn_rp_origin(),
+            rp_name: default_webauthn_rp_name(),
+        }
+    }
+}
+
+fn default_webauthn_rp_id() -> String {
+    "localhost".into()
+}
+
+fn default_webauthn_rp_origin() -> String {
+    "http://localhost:42617".into()
+}
+
+fn default_webauthn_rp_name() -> String {
+    "ZeroClaw".into()
 }
 
 /// OTP validation strategy.
@@ -6774,6 +7392,9 @@ pub enum SandboxBackend {
     Bubblewrap,
     /// Docker container isolation
     Docker,
+    /// macOS sandbox-exec (Seatbelt)
+    #[serde(alias = "sandbox-exec")]
+    SandboxExec,
     /// No sandboxing (application-layer only)
     None,
 }
@@ -7513,6 +8134,7 @@ impl Default for Config {
             model_providers: HashMap::new(),
             default_temperature: default_temperature(),
             provider_timeout_secs: default_provider_timeout_secs(),
+            provider_max_tokens: None,
             extra_headers: HashMap::new(),
             observability: ObservabilityConfig::default(),
             autonomy: AutonomyConfig::default(),
@@ -7528,6 +8150,7 @@ impl Default for Config {
             agent: AgentConfig::default(),
             pacing: PacingConfig::default(),
             skills: SkillsConfig::default(),
+            pipeline: PipelineConfig::default(),
             model_routes: Vec::new(),
             embedding_routes: Vec::new(),
             heartbeat: HeartbeatConfig::default(),
@@ -8615,6 +9238,13 @@ impl Config {
                 if !trimmed.is_empty() {
                     self.api_path = Some(trimmed.to_string());
                 }
+            }
+        }
+
+        // Propagate max_tokens from the profile when not already set at top level.
+        if self.provider_max_tokens.is_none() {
+            if let Some(max_tokens) = profile.max_tokens {
+                self.provider_max_tokens = Some(max_tokens);
             }
         }
 
@@ -10085,7 +10715,21 @@ async fn sync_directory(path: &Path) -> Result<()> {
         Ok(())
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x02000000;
+        let dir = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+            .with_context(|| format!("Failed to open directory for fsync: {}", path.display()))?;
+        dir.sync_all()
+            .with_context(|| format!("Failed to fsync directory metadata: {}", path.display()))?;
+        Ok(())
+    }
+
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = path;
         Ok(())
@@ -10462,6 +11106,82 @@ default_temperature = 0.7
         assert_eq!(m.purge_after_days, 30);
         assert_eq!(m.conversation_retention_days, 30);
         assert!(m.sqlite_open_timeout_secs.is_none());
+        assert_eq!(m.search_mode, SearchMode::Hybrid);
+    }
+
+    #[test]
+    async fn search_mode_config_deserialization() {
+        let toml_str = r#"
+workspace_dir = "/tmp/workspace"
+config_path = "/tmp/config.toml"
+default_temperature = 0.7
+
+[memory]
+backend = "sqlite"
+auto_save = true
+search_mode = "bm25"
+"#;
+        let parsed = parse_test_config(toml_str);
+        assert_eq!(parsed.memory.search_mode, SearchMode::Bm25);
+
+        let toml_str_embedding = r#"
+workspace_dir = "/tmp/workspace"
+config_path = "/tmp/config.toml"
+default_temperature = 0.7
+
+[memory]
+backend = "sqlite"
+auto_save = true
+search_mode = "embedding"
+"#;
+        let parsed = parse_test_config(toml_str_embedding);
+        assert_eq!(parsed.memory.search_mode, SearchMode::Embedding);
+
+        let toml_str_hybrid = r#"
+workspace_dir = "/tmp/workspace"
+config_path = "/tmp/config.toml"
+default_temperature = 0.7
+
+[memory]
+backend = "sqlite"
+auto_save = true
+search_mode = "hybrid"
+"#;
+        let parsed = parse_test_config(toml_str_hybrid);
+        assert_eq!(parsed.memory.search_mode, SearchMode::Hybrid);
+    }
+
+    #[test]
+    async fn search_mode_defaults_to_hybrid_when_omitted() {
+        let toml_str = r#"
+workspace_dir = "/tmp/workspace"
+config_path = "/tmp/config.toml"
+default_temperature = 0.7
+
+[memory]
+backend = "sqlite"
+auto_save = true
+"#;
+        let parsed = parse_test_config(toml_str);
+        assert_eq!(parsed.memory.search_mode, SearchMode::Hybrid);
+    }
+
+    #[test]
+    async fn search_mode_serde_roundtrip() {
+        let json_bm25 = serde_json::to_string(&SearchMode::Bm25).unwrap();
+        assert_eq!(json_bm25, "\"bm25\"");
+        let parsed: SearchMode = serde_json::from_str(&json_bm25).unwrap();
+        assert_eq!(parsed, SearchMode::Bm25);
+
+        let json_embedding = serde_json::to_string(&SearchMode::Embedding).unwrap();
+        assert_eq!(json_embedding, "\"embedding\"");
+        let parsed: SearchMode = serde_json::from_str(&json_embedding).unwrap();
+        assert_eq!(parsed, SearchMode::Embedding);
+
+        let json_hybrid = serde_json::to_string(&SearchMode::Hybrid).unwrap();
+        assert_eq!(json_hybrid, "\"hybrid\"");
+        let parsed: SearchMode = serde_json::from_str(&json_hybrid).unwrap();
+        assert_eq!(parsed, SearchMode::Hybrid);
     }
 
     #[test]
@@ -10498,6 +11218,7 @@ default_temperature = 0.7
             model_providers: HashMap::new(),
             default_temperature: 0.5,
             provider_timeout_secs: 120,
+            provider_max_tokens: None,
             extra_headers: HashMap::new(),
             observability: ObservabilityConfig {
                 backend: "log".into(),
@@ -10531,6 +11252,7 @@ default_temperature = 0.7
             reliability: ReliabilityConfig::default(),
             scheduler: SchedulerConfig::default(),
             skills: SkillsConfig::default(),
+            pipeline: PipelineConfig::default(),
             model_routes: Vec::new(),
             embedding_routes: Vec::new(),
             query_classification: QueryClassificationConfig::default(),
@@ -10583,6 +11305,7 @@ default_temperature = 0.7
                 clawdtalk: None,
                 reddit: None,
                 bluesky: None,
+                voice_call: None,
                 #[cfg(feature = "voice-wake")]
                 voice_wake: None,
                 message_timeout_secs: 300,
@@ -11097,6 +11820,7 @@ default_temperature = 0.7
             model_providers: HashMap::new(),
             default_temperature: 0.9,
             provider_timeout_secs: 120,
+            provider_max_tokens: None,
             extra_headers: HashMap::new(),
             observability: ObservabilityConfig::default(),
             autonomy: AutonomyConfig::default(),
@@ -11110,6 +11834,7 @@ default_temperature = 0.7
             reliability: ReliabilityConfig::default(),
             scheduler: SchedulerConfig::default(),
             skills: SkillsConfig::default(),
+            pipeline: PipelineConfig::default(),
             model_routes: Vec::new(),
             embedding_routes: Vec::new(),
             query_classification: QueryClassificationConfig::default(),
@@ -11586,6 +12311,7 @@ allowed_users = ["@ops:matrix.org"]
             clawdtalk: None,
             reddit: None,
             bluesky: None,
+            voice_call: None,
             #[cfg(feature = "voice-wake")]
             voice_wake: None,
             message_timeout_secs: 300,
@@ -11631,6 +12357,7 @@ allowed_users = ["@ops:matrix.org"]
     async fn slack_config_deserializes_without_allowed_users() {
         let json = r#"{"bot_token":"xoxb-tok"}"#;
         let parsed: SlackConfig = serde_json::from_str(json).unwrap();
+        assert!(parsed.channel_ids.is_empty());
         assert!(parsed.allowed_users.is_empty());
         assert!(!parsed.interrupt_on_new_message);
         assert_eq!(parsed.thread_replies, None);
@@ -11641,7 +12368,19 @@ allowed_users = ["@ops:matrix.org"]
     async fn slack_config_deserializes_with_allowed_users() {
         let json = r#"{"bot_token":"xoxb-tok","allowed_users":["U111"]}"#;
         let parsed: SlackConfig = serde_json::from_str(json).unwrap();
+        assert!(parsed.channel_ids.is_empty());
         assert_eq!(parsed.allowed_users, vec!["U111"]);
+        assert!(!parsed.interrupt_on_new_message);
+        assert_eq!(parsed.thread_replies, None);
+        assert!(!parsed.mention_only);
+    }
+
+    #[test]
+    async fn slack_config_deserializes_with_channel_ids() {
+        let json = r#"{"bot_token":"xoxb-tok","channel_ids":["C111","D222"]}"#;
+        let parsed: SlackConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.channel_ids, vec!["C111", "D222"]);
+        assert!(parsed.allowed_users.is_empty());
         assert!(!parsed.interrupt_on_new_message);
         assert_eq!(parsed.thread_replies, None);
         assert!(!parsed.mention_only);
@@ -11706,11 +12445,27 @@ bot_token = "xoxb-tok"
 channel_id = "C123"
 "#;
         let parsed: SlackConfig = toml::from_str(toml_str).unwrap();
+        assert!(parsed.channel_ids.is_empty());
         assert!(parsed.allowed_users.is_empty());
         assert!(!parsed.interrupt_on_new_message);
         assert_eq!(parsed.thread_replies, None);
         assert!(!parsed.mention_only);
         assert_eq!(parsed.channel_id.as_deref(), Some("C123"));
+    }
+
+    #[test]
+    async fn slack_config_toml_accepts_channel_ids() {
+        let toml_str = r#"
+bot_token = "xoxb-tok"
+channel_ids = ["C123", "D456"]
+"#;
+        let parsed: SlackConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(parsed.channel_ids, vec!["C123", "D456"]);
+        assert!(parsed.allowed_users.is_empty());
+        assert!(!parsed.interrupt_on_new_message);
+        assert_eq!(parsed.thread_replies, None);
+        assert!(!parsed.mention_only);
+        assert!(parsed.channel_id.is_none());
     }
 
     #[test]
@@ -11909,6 +12664,7 @@ channel_id = "C123"
             clawdtalk: None,
             reddit: None,
             bluesky: None,
+            voice_call: None,
             #[cfg(feature = "voice-wake")]
             voice_wake: None,
             message_timeout_secs: 300,
@@ -12005,6 +12761,7 @@ channel_id = "C123"
             session_persistence: true,
             session_ttl_hours: 0,
             pairing_dashboard: PairingDashboardConfig::default(),
+            tls: None,
         };
         let toml_str = toml::to_string(&g).unwrap();
         let parsed: GatewayConfig = toml::from_str(&toml_str).unwrap();
@@ -12507,6 +13264,7 @@ requires_openai_auth = true
                     azure_openai_deployment: None,
                     azure_openai_api_version: None,
                     api_path: None,
+                    max_tokens: None,
                 },
             )]),
             ..Config::default()
@@ -12539,6 +13297,7 @@ requires_openai_auth = true
                     azure_openai_deployment: None,
                     azure_openai_api_version: None,
                     api_path: None,
+                    max_tokens: None,
                 },
             )]),
             api_key: None,
@@ -12639,6 +13398,7 @@ requires_openai_auth = true
                     azure_openai_deployment: None,
                     azure_openai_api_version: None,
                     api_path: None,
+                    max_tokens: None,
                 },
             )]),
             ..Config::default()
@@ -14847,5 +15607,20 @@ auto_approve = ["file_read", "file_write", "file_edit", "memory_recall", "memory
                 "Docker config auto_approve missing expected tool: {tool}"
             );
         }
+    }
+
+    #[test]
+    async fn cost_enforcement_config_defaults() {
+        let config = CostEnforcementConfig::default();
+        assert_eq!(config.mode, "warn");
+        assert_eq!(config.route_down_model, None);
+        assert_eq!(config.reserve_percent, 10);
+    }
+
+    #[test]
+    async fn cost_config_includes_enforcement() {
+        let config = CostConfig::default();
+        assert_eq!(config.enforcement.mode, "warn");
+        assert_eq!(config.enforcement.reserve_percent, 10);
     }
 }
